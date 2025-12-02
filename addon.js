@@ -7,7 +7,7 @@ const SUBREDDIT_URL = 'https://www.reddit.com/r/movieleaks/new.json';
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io/catalog/movie/top';
 
 // RPDB API Key (Pre-filled)
-const RPDB_API_KEY = '';
+// const RPDB_API_KEY = '';
 
 // Cache configuration
 const UPDATE_INTERVAL = 15 * 60 * 1000; // 15 minutes
