@@ -5,21 +5,22 @@ const axios = require('axios');
 const PORT = process.env.PORT || 7000;
 const SUBREDDIT_URL = 'https://www.reddit.com/r/movieleaks/new.json';
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io/catalog/movie/top';
-
-// Use a real browser User-Agent to avoid Reddit blocks
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+// 60 days in milliseconds
+const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; 
+
 const manifest = {
-    id: 'org.reddit.movieleaks.v4',
-    version: '4.0.0',
-    name: 'Reddit Movie Leaks (Robust)',
-    description: 'Latest releases. If IMDb fails, shows raw Reddit title.',
+    id: 'org.reddit.movieleaks.v5',
+    version: '5.0.0',
+    name: 'Reddit Movie Leaks (2 Months)',
+    description: 'Scrapes r/MovieLeaks going back 2 months. Be patient on first load.',
     resources: ['catalog'],
     types: ['movie'],
     catalogs: [
         {
             type: 'movie',
-            id: 'movieleaks_best',
+            id: 'movieleaks_long',
             name: 'Movie Leaks',
             extra: [{ name: 'skip' }]
         }
@@ -32,9 +33,10 @@ let lastStatus = "Initializing...";
 
 // --- Helpers ---
 
+// Delay function to prevent Reddit bans (2 seconds)
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 function parseTitle(rawTitle) {
-    // Regex to find "Title" and "Year"
-    // Matches: "Saltburn 2023", "Saltburn.2023", "Saltburn (2023)"
     const regex = /^(.+?)[\.\s\(]+(\d{4})[\.\s\)]+/;
     const match = rawTitle.match(regex);
     if (match) {
@@ -43,12 +45,11 @@ function parseTitle(rawTitle) {
             year: match[2]
         };
     }
-    // Fallback: If no year found, return raw title and current year estimate
     return { title: rawTitle, year: null };
 }
 
 async function resolveToImdb(title, year) {
-    if (!year) return null; // Cinemeta needs a year to be accurate
+    if (!year) return null;
     try {
         const query = `${title} ${year}`;
         const url = `${CINEMETA_URL}/search=${encodeURIComponent(query)}.json`;
@@ -57,60 +58,98 @@ async function resolveToImdb(title, year) {
             return data.metas[0];
         }
     } catch (e) {
-        // Ignore errors, we will fallback to raw data
+        return null;
     }
     return null;
 }
 
 async function updateCatalog() {
-    console.log(`[${new Date().toLocaleTimeString()}] Fetching r/MovieLeaks...`);
-    lastStatus = "Fetching from Reddit...";
+    console.log('--- STARTING 2-MONTH SCRAPE ---');
+    lastStatus = "Scraping Reddit (Page 1)...";
     
-    try {
-        const response = await axios.get(SUBREDDIT_URL, {
-            headers: { 'User-Agent': USER_AGENT }
-        });
+    let allPosts = [];
+    let afterToken = null;
+    let keepFetching = true;
+    let page = 1;
+    
+    // Time cutoff (2 months ago)
+    // Reddit API uses SECONDS for timestamp, JS uses MILLISECONDS
+    const cutoffDateSeconds = Math.floor((Date.now() - MAX_AGE_MS) / 1000);
 
-        const redditPosts = response.data.data.children;
-        console.log(`> Found ${redditPosts.length} posts. Processing...`);
-        lastStatus = `Processing ${redditPosts.length} posts...`;
+    try {
+        while (keepFetching) {
+            console.log(`> Fetching Page ${page}...`);
+            lastStatus = `Fetching Page ${page}...`;
+
+            const url = `${SUBREDDIT_URL}?limit=100&after=${afterToken || ''}`;
+            
+            const response = await axios.get(url, {
+                headers: { 'User-Agent': USER_AGENT }
+            });
+
+            const children = response.data.data.children;
+            
+            if (children.length === 0) {
+                keepFetching = false;
+                break;
+            }
+
+            for (const child of children) {
+                const p = child.data;
+                
+                // Stop if post is older than 2 months
+                if (p.created_utc < cutoffDateSeconds) {
+                    console.log(`> Reached limit: Post from ${new Date(p.created_utc * 1000).toLocaleDateString()}`);
+                    keepFetching = false;
+                    break; 
+                }
+                
+                allPosts.push(p);
+            }
+
+            // Pagination logic
+            afterToken = response.data.data.after;
+            if (!afterToken) keepFetching = false;
+
+            page++;
+            // Polite delay between pages
+            if (keepFetching) await delay(2000); 
+        }
+
+        console.log(`> Found ${allPosts.length} posts in last 2 months. Processing IMDB...`);
+        lastStatus = `Processing ${allPosts.length} items...`;
 
         const newCatalog = [];
 
-        for (const post of redditPosts.slice(0, 40)) {
-            const p = post.data;
+        // Process posts (Latest first)
+        for (const p of allPosts) {
             const parsed = parseTitle(p.title);
-            
-            // 1. Try to resolve to a real IMDb item
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
 
             if (imdbItem) {
-                // Success: We found a real movie
+                // Official Poster
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
                     name: imdbItem.name,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
-                    description: `(IMDb Match) ${imdbItem.description || ''}`,
+                    description: `(Verified) ${imdbItem.description || ''}`,
                     releaseInfo: imdbItem.releaseInfo
                 });
-                console.log(`> Matched: ${parsed.title} -> ${imdbItem.id}`);
             } else {
-                // Failure: Just show the Reddit post as a custom item
-                // This ensures the list is NEVER empty if Reddit works
+                // Fallback Item
                 newCatalog.push({
                     id: `leaks_${p.id}`,
                     type: 'movie',
                     name: parsed.title,
-                    poster: p.thumbnail && p.thumbnail.startsWith('http') ? p.thumbnail : null,
-                    description: `Raw Reddit Post: ${p.title}\n\nCould not find IMDb match.`,
+                    poster: null, 
+                    description: `Unmatched Release: ${p.title}`,
                     releaseInfo: parsed.year || '????'
                 });
-                console.log(`> Raw: ${parsed.title} (No IMDb match)`);
             }
         }
 
-        // Remove duplicates
+        // Deduplicate
         const uniqueCatalog = [];
         const seenIds = new Set();
         for (const item of newCatalog) {
@@ -125,7 +164,7 @@ async function updateCatalog() {
         console.log(`> Update Complete. Catalog size: ${movieCatalog.length}`);
 
     } catch (error) {
-        console.error('! Error updating catalog:', error.message);
+        console.error('! Error:', error.message);
         lastStatus = `Error: ${error.message}`;
     }
 }
@@ -133,20 +172,20 @@ async function updateCatalog() {
 // --- Handler ---
 
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
-    // If the catalog is empty, show a Status Card so the user knows why
+    // Show status if empty
     if (movieCatalog.length === 0) {
         return {
             metas: [{
-                id: 'tt0000000',
+                id: 'tt_status',
                 type: 'movie',
                 name: `Status: ${lastStatus}`,
-                description: "If this says 'Fetching', wait 10 seconds and reload. If 'Error', check Termux logs.",
+                description: "Please wait for the server to finish fetching 2 months of data.",
                 poster: 'https://via.placeholder.com/300x450.png?text=Loading...',
             }]
         };
     }
 
-    if (type === 'movie' && id === 'movieleaks_best') {
+    if (type === 'movie' && id === 'movieleaks_long') {
         const skip = extra.skip ? parseInt(extra.skip) : 0;
         return { metas: movieCatalog.slice(skip, skip + 100) };
     }
@@ -154,8 +193,12 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
+
+// Run initial update immediately
 updateCatalog();
-setInterval(updateCatalog, 15 * 60 * 1000); // 15 mins
+
+// Refresh every hour (fetching 2 months of data takes time, so we do it less often)
+setInterval(updateCatalog, 60 * 60 * 1000); 
 
 console.log(`Addon running on http://localhost:${PORT}`);
 
