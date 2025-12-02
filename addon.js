@@ -6,18 +6,15 @@ const PORT = process.env.PORT || 7000;
 const SUBREDDIT_URL = 'https://www.reddit.com/r/movieleaks/new.json';
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io/catalog/movie/top';
 
-// RPDB API Key (Pre-filled)
-// const RPDB_API_KEY = '';
-
 // Cache configuration
 const UPDATE_INTERVAL = 15 * 60 * 1000; // 15 minutes
 let movieCatalog = []; 
 
 const manifest = {
-    id: 'org.reddit.movieleaks.imdb',
-    version: '2.2.0',
-    name: 'Reddit Movie Leaks (RPDB)',
-    description: 'Latest r/MovieLeaks releases with IMDb matching and RPDB ratings.',
+    id: 'org.reddit.movieleaks.v3',
+    version: '3.0.0', // Version bumped to force refresh
+    name: 'Reddit Movie Leaks (Fixed)',
+    description: 'Latest r/MovieLeaks releases with official Stremio posters.',
     resources: ['catalog'],
     types: ['movie'],
     catalogs: [
@@ -35,7 +32,6 @@ const builder = new addonBuilder(manifest);
 // --- Helpers ---
 
 function parseTitle(rawTitle) {
-    // Regex extracts title and year from "Movie.Title.2023.1080p..."
     const regex = /^(.+?)[\.\s\(]+(\d{4})[\.\s\)]+/;
     const match = rawTitle.match(regex);
     if (match) {
@@ -66,18 +62,18 @@ async function updateCatalog() {
     console.log('--- Updating Catalog from r/MovieLeaks ---');
     try {
         const response = await axios.get(SUBREDDIT_URL, {
-            headers: { 'User-Agent': 'StremioAddon/2.2' }
+            headers: { 'User-Agent': 'StremioAddon/3.0' }
         });
 
         const redditPosts = response.data.data.children;
         const newCatalog = [];
 
-        // Limit to top 40 to prevent rate limits
+        // Process top 40 posts
         for (const post of redditPosts.slice(0, 40)) {
             const parsed = parseTitle(post.data.title);
             
             if (parsed) {
-                // Check local cache first
+                // Check local cache
                 const existing = movieCatalog.find(m => m.name === parsed.title && m.releaseInfo === parsed.year);
                 
                 if (existing) {
@@ -86,8 +82,9 @@ async function updateCatalog() {
                     const imdbItem = await resolveToImdb(parsed.title, parsed.year);
                     if (imdbItem) {
                         
-                        // Construct RPDB URL using the provided key
-                        const posterUrl = `https://api.ratingposterdb.com/${RPDB_API_KEY}/imdb/poster/default/${imdbItem.id}.jpg`;
+                        // FIX: Force Official Stremio Poster URL
+                        // This uses MetaHub directly, which is always reliable.
+                        const posterUrl = `https://images.metahub.space/poster/medium/${imdbItem.id}/img`;
 
                         newCatalog.push({
                             id: imdbItem.id,
@@ -98,6 +95,7 @@ async function updateCatalog() {
                             releaseInfo: imdbItem.releaseInfo
                         });
                         console.log(`Matched: ${parsed.title} -> ${imdbItem.id}`);
+                        console.log(`Poster: ${posterUrl}`); // Log to check in Termux
                     }
                 }
             }
@@ -133,8 +131,6 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
-
-// Init
 updateCatalog();
 setInterval(updateCatalog, UPDATE_INTERVAL);
 
