@@ -36,6 +36,40 @@ let lastStatus = "Initializing...";
 // Delay function to prevent Reddit bans (2 seconds)
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- NEW: Direct Rotten Tomatoes Fetcher ---
+async function fetchRottenTomatoesDirect(title, year) {
+    try {
+        // Search just Title first, then Title + Year if needed
+        let searchQueries = [title];
+        if (year) searchQueries.push(`${title} ${year}`);
+
+        for (const query of searchQueries) {
+            const url = `https://www.rottentomatoes.com/napi/search/all?query=${encodeURIComponent(query)}&limit=5`;
+            const { data } = await axios.get(url, { 
+                headers: { 'User-Agent': USER_AGENT } 
+            });
+
+            if (data && data.movie && data.movie.items && data.movie.items.length > 0) {
+                const match = data.movie.items.find(m => {
+                    if (year && m.releaseYear) {
+                        const diff = Math.abs(parseInt(m.releaseYear) - parseInt(year));
+                        return diff <= 1; // Allow 1 year variance
+                    }
+                    return true;
+                });
+
+                if (match && match.tomatometerScore && match.tomatometerScore.score) {
+                    return `${match.tomatometerScore.score}%`;
+                }
+            }
+            await delay(200); // Polite delay between retries
+        }
+    } catch (e) {
+        // Ignore errors to keep flow moving
+    }
+    return null;
+}
+
 function parseTitle(rawTitle) {
     const regex = /^(.+?)[\.\s\(]+(\d{4})[\.\s\)]+/;
     const match = rawTitle.match(regex);
@@ -116,7 +150,7 @@ async function updateCatalog() {
             if (keepFetching) await delay(2000); 
         }
 
-        console.log(`> Found ${allPosts.length} posts in last 2 months. Processing IMDB...`);
+        console.log(`> Found ${allPosts.length} posts in last 2 months. Processing IMDB & RT...`);
         lastStatus = `Processing ${allPosts.length} items...`;
 
         const newCatalog = [];
@@ -124,14 +158,20 @@ async function updateCatalog() {
         // Process posts (Latest first)
         for (const p of allPosts) {
             const parsed = parseTitle(p.title);
+            
+            // 1. Resolve to IMDb
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
+
+            // 2. NEW: Fetch Rotten Tomatoes Score
+            const rtScore = await fetchRottenTomatoesDirect(parsed.title, parsed.year);
+            const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
 
             if (imdbItem) {
                 // Official Poster
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: imdbItem.name,
+                    name: `${scorePrefix}${imdbItem.name}`, // Add score here
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `(Verified) ${imdbItem.description || ''}`,
                     releaseInfo: imdbItem.releaseInfo
@@ -141,12 +181,15 @@ async function updateCatalog() {
                 newCatalog.push({
                     id: `leaks_${p.id}`,
                     type: 'movie',
-                    name: parsed.title,
+                    name: `${scorePrefix}${parsed.title}`, // Add score here too
                     poster: null, 
                     description: `Unmatched Release: ${p.title}`,
                     releaseInfo: parsed.year || '????'
                 });
             }
+            
+            // Slight delay to be gentle on RT API
+            await delay(100); 
         }
 
         // Deduplicate
@@ -201,5 +244,3 @@ updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000); 
 
 console.log(`Addon running on http://localhost:${PORT}`);
-
-
