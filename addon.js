@@ -12,7 +12,7 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v5',
-    version: '5.0.1', // Bumped version
+    version: '5.0.2', // Bumped version
     name: 'Reddit Movie Leaks (2 Months)',
     description: 'Scrapes r/MovieLeaks going back 2 months. Be patient on first load.',
     resources: ['catalog'],
@@ -36,35 +36,51 @@ let lastStatus = "Initializing...";
 // Delay function to prevent Reddit bans (2 seconds)
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- NEW: Direct Rotten Tomatoes Fetcher ---
+// --- NEW: Direct Rotten Tomatoes Fetcher (HTML Scraping) ---
 async function fetchRottenTomatoesDirect(title, year) {
     try {
-        // Search just Title first, then Title + Year if needed
         let searchQueries = [title];
         if (year) searchQueries.push(`${title} ${year}`);
 
         for (const query of searchQueries) {
-            const url = `https://www.rottentomatoes.com/napi/search/all?query=${encodeURIComponent(query)}&limit=10`;
+            // Use standard search page (HTML) instead of broken internal API
+            const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
             const { data } = await axios.get(url, { 
                 headers: { 
-                    'User-Agent': USER_AGENT,
-                    'Accept': 'application/json'
+                    'User-Agent': USER_AGENT
                 } 
             });
 
-            if (data && data.movie && data.movie.items && data.movie.items.length > 0) {
-                const match = data.movie.items.find(m => {
-                    if (year && m.releaseYear) {
-                        const diff = Math.abs(parseInt(m.releaseYear) - parseInt(year));
-                        return diff <= 1; // Allow 1 year variance (e.g. Leak 2024, RT 2025)
+            // Regex to parse <search-page-result> tags from HTML
+            // This avoids needing 'cheerio' dependency and is robust for RT's current layout
+            const matches = [...data.matchAll(/<search-page-result([^>]+)>/g)];
+            
+            const items = matches.map(m => {
+                const attrs = m[1];
+                const getAttr = (name) => {
+                    const match = attrs.match(new RegExp(`${name}="([^"]*)"`));
+                    return match ? match[1] : null;
+                };
+                return {
+                    type: getAttr('type'),
+                    title: getAttr('name'),
+                    year: getAttr('releaseyear'),
+                    score: getAttr('tomatometerscore')
+                };
+            }).filter(i => i.type === 'movie'); // Filter for movies only
+
+            if (items.length > 0) {
+                const match = items.find(m => {
+                    if (year && m.year) {
+                        const diff = Math.abs(parseInt(m.year) - parseInt(year));
+                        return diff <= 1; // Allow 1 year variance
                     }
                     return true;
                 });
 
-                // Check explicitly for undefined to handle 0 score or number types
-                if (match && match.tomatometerScore && match.tomatometerScore.score !== undefined) {
-                    console.log(`> 🍅 Found Score for "${title}": ${match.tomatometerScore.score}%`);
-                    return `${match.tomatometerScore.score}%`;
+                if (match && match.score) {
+                    console.log(`> 🍅 Found Score for "${title}": ${match.score}%`);
+                    return `${match.score}%`;
                 }
             }
             await delay(200); // Polite delay between retries
@@ -165,7 +181,7 @@ async function updateCatalog() {
             // 1. Resolve to IMDb
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
 
-            // 2. NEW: Fetch Rotten Tomatoes Score
+            // 2. NEW: Fetch Rotten Tomatoes Score (HTML Fallback)
             const rtScore = await fetchRottenTomatoesDirect(parsed.title, parsed.year);
             const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
 
@@ -191,7 +207,7 @@ async function updateCatalog() {
                 });
             }
             
-            // Slight delay to be gentle on RT API
+            // Slight delay to be gentle on RT
             await delay(100); 
         }
 
