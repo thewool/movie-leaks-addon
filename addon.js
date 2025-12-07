@@ -12,7 +12,7 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v5',
-    version: '5.0.0',
+    version: '5.0.1', // Bumped version
     name: 'Reddit Movie Leaks (2 Months)',
     description: 'Scrapes r/MovieLeaks going back 2 months. Be patient on first load.',
     resources: ['catalog'],
@@ -44,28 +44,33 @@ async function fetchRottenTomatoesDirect(title, year) {
         if (year) searchQueries.push(`${title} ${year}`);
 
         for (const query of searchQueries) {
-            const url = `https://www.rottentomatoes.com/napi/search/all?query=${encodeURIComponent(query)}&limit=5`;
+            const url = `https://www.rottentomatoes.com/napi/search/all?query=${encodeURIComponent(query)}&limit=10`;
             const { data } = await axios.get(url, { 
-                headers: { 'User-Agent': USER_AGENT } 
+                headers: { 
+                    'User-Agent': USER_AGENT,
+                    'Accept': 'application/json'
+                } 
             });
 
             if (data && data.movie && data.movie.items && data.movie.items.length > 0) {
                 const match = data.movie.items.find(m => {
                     if (year && m.releaseYear) {
                         const diff = Math.abs(parseInt(m.releaseYear) - parseInt(year));
-                        return diff <= 1; // Allow 1 year variance
+                        return diff <= 1; // Allow 1 year variance (e.g. Leak 2024, RT 2025)
                     }
                     return true;
                 });
 
-                if (match && match.tomatometerScore && match.tomatometerScore.score) {
+                // Check explicitly for undefined to handle 0 score or number types
+                if (match && match.tomatometerScore && match.tomatometerScore.score !== undefined) {
+                    console.log(`> 🍅 Found Score for "${title}": ${match.tomatometerScore.score}%`);
                     return `${match.tomatometerScore.score}%`;
                 }
             }
             await delay(200); // Polite delay between retries
         }
     } catch (e) {
-        // Ignore errors to keep flow moving
+        console.log(`! RT Search Error for "${title}": ${e.message}`);
     }
     return null;
 }
@@ -107,7 +112,6 @@ async function updateCatalog() {
     let page = 1;
     
     // Time cutoff (2 months ago)
-    // Reddit API uses SECONDS for timestamp, JS uses MILLISECONDS
     const cutoffDateSeconds = Math.floor((Date.now() - MAX_AGE_MS) / 1000);
 
     try {
@@ -146,7 +150,6 @@ async function updateCatalog() {
             if (!afterToken) keepFetching = false;
 
             page++;
-            // Polite delay between pages
             if (keepFetching) await delay(2000); 
         }
 
