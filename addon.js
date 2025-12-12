@@ -5,7 +5,7 @@ const axios = require('axios');
 const PORT = process.env.PORT || 7000;
 const SUBREDDIT_URL = 'https://www.reddit.com/r/movieleaks/new.json';
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io/catalog/movie/top';
-const OMDB_API_KEY = 'a8924bd9'; // Uses your key for reliable scores
+const OMDB_API_KEY = 'a8924bd9'; 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // 60 days in milliseconds
@@ -13,10 +13,10 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v5',
-    version: '5.0.5', 
+    version: '5.0.6', 
     name: 'Reddit Movie Leaks (2 Months)',
     description: 'Scrapes r/MovieLeaks with OMDB/RT Scores.',
-    resources: ['catalog'],
+    resources: ['catalog', 'meta'], // Added 'meta' to force custom description on detail view
     types: ['movie'],
     catalogs: [
         {
@@ -58,14 +58,11 @@ async function fetchScoresFromOmdb(imdbId) {
 async function fetchRottenTomatoesFallback(title, year) {
     try {
         const query = year ? `${title} ${year}` : title;
-        // Search page often returns a list of movies
         const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
         const { data } = await axios.get(url, { 
             headers: { 'User-Agent': USER_AGENT } 
         });
 
-        // Loose regex to find the score in the search results HTML
-        // Looks for "tomatometerscore="88"" or similar attributes
         const scoreMatch = data.match(/tomatometerscore="(\d+)"/i);
         if (scoreMatch && scoreMatch[1]) {
             console.log(`> 🍅 Scrape Hit for "${title}": ${scoreMatch[1]}%`);
@@ -148,20 +145,16 @@ async function updateCatalog() {
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
             
             let rtScore = null;
-
             if (imdbItem) {
-                // 2. Try OMDB (Best source)
                 rtScore = await fetchScoresFromOmdb(imdbItem.id);
             }
-
-            // 3. Fallback: Try Scraping if OMDB missed
             if (!rtScore) {
                 rtScore = await fetchRottenTomatoesFallback(parsed.title, parsed.year);
             }
 
             const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
-            // Change: Added newline after score so it sits on top
-            const scoreDesc = rtScore ? `Rotten Tomatoes: ${rtScore}\n` : '';
+            // Force newline for description
+            const scoreDesc = rtScore ? `Rotten Tomatoes: ${rtScore}\n\n` : '';
 
             if (imdbItem) {
                 newCatalog.push({
@@ -169,7 +162,6 @@ async function updateCatalog() {
                     type: 'movie',
                     name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
-                    // Change: Moved scoreDesc to the start
                     description: `${scoreDesc}(Verified) ${imdbItem.description || ''}`,
                     releaseInfo: imdbItem.releaseInfo
                 });
@@ -179,15 +171,13 @@ async function updateCatalog() {
                     type: 'movie',
                     name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
-                    // Change: Moved scoreDesc to the start
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
                     releaseInfo: parsed.year || '????'
                 });
             }
-            await delay(50); // Be nice to APIs
+            await delay(50);
         }
 
-        // Deduplicate
         const uniqueCatalog = [];
         const seenIds = new Set();
         for (const item of newCatalog) {
@@ -207,6 +197,8 @@ async function updateCatalog() {
     }
 }
 
+// --- Handlers ---
+
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     if (movieCatalog.length === 0) {
         return {
@@ -224,6 +216,16 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
         return { metas: movieCatalog.slice(skip, skip + 100) };
     }
     return { metas: [] };
+});
+
+// NEW: Meta Handler to ensure custom description is shown in Details view
+builder.defineMetaHandler(({ type, id }) => {
+    // Find the item in our local catalog to return our custom description
+    const item = movieCatalog.find(i => i.id === id);
+    if (item) {
+        return { meta: item };
+    }
+    return { meta: null };
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
