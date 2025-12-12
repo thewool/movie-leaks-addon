@@ -13,10 +13,12 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v5',
-    version: '5.0.6', 
+    version: '5.0.7', // Bumped version
     name: 'Reddit Movie Leaks (2 Months)',
     description: 'Scrapes r/MovieLeaks with OMDB/RT Scores.',
-    resources: ['catalog', 'meta'], // Added 'meta' to force custom description on detail view
+    // KEY FIX: Claiming 'tt' prefixes tells Stremio to check us for metadata on IMDb IDs
+    idPrefixes: ['tt', 'leaks'], 
+    resources: ['catalog', 'meta'],
     types: ['movie'],
     catalogs: [
         {
@@ -153,8 +155,8 @@ async function updateCatalog() {
             }
 
             const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
-            // Force newline for description
-            const scoreDesc = rtScore ? `Rotten Tomatoes: ${rtScore}\n\n` : '';
+            // Make the score very obvious in the description
+            const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
 
             if (imdbItem) {
                 newCatalog.push({
@@ -162,7 +164,7 @@ async function updateCatalog() {
                     type: 'movie',
                     name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
-                    description: `${scoreDesc}(Verified) ${imdbItem.description || ''}`,
+                    description: `${scoreDesc}${imdbItem.description || ''}`,
                     releaseInfo: imdbItem.releaseInfo
                 });
             } else {
@@ -218,13 +220,13 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     return { metas: [] };
 });
 
-// NEW: Meta Handler to ensure custom description is shown in Details view
+// IMPORTANT: Returns custom metadata (with score) even for IMDb IDs
 builder.defineMetaHandler(({ type, id }) => {
-    // Find the item in our local catalog to return our custom description
     const item = movieCatalog.find(i => i.id === id);
     if (item) {
         return { meta: item };
     }
+    // If not in our list, return null so Stremio asks the next addon (Cinemeta)
     return { meta: null };
 });
 
@@ -232,5 +234,3 @@ serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000); 
 console.log(`Addon running on http://localhost:${PORT}`);
-
-
