@@ -12,11 +12,11 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; 
 
 const manifest = {
-    id: 'org.reddit.movieleaks.v5',
-    version: '5.0.7', // Bumped version
-    name: 'Reddit Movie Leaks (2 Months)',
-    description: 'Scrapes r/MovieLeaks with OMDB/RT Scores.',
-    // KEY FIX: Claiming 'tt' prefixes tells Stremio to check us for metadata on IMDb IDs
+    id: 'org.reddit.movieleaks.v6', // Changed ID to force fresh install
+    version: '6.0.0', 
+    name: 'Reddit Movie Leaks (with Scores)',
+    description: 'Scrapes r/MovieLeaks. NOW WITH SCORES IN GENRES & DESCRIPTION.',
+    // Claims 'tt' so Stremio knows we provide metadata for IMDb items
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -51,7 +51,7 @@ async function fetchScoresFromOmdb(imdbId) {
             }
         }
     } catch (e) {
-        // console.log(`! OMDB Error: ${e.message}`);
+        // Silent error
     }
     return null;
 }
@@ -65,13 +65,14 @@ async function fetchRottenTomatoesFallback(title, year) {
             headers: { 'User-Agent': USER_AGENT } 
         });
 
-        const scoreMatch = data.match(/tomatometerscore="(\d+)"/i);
+        // Regex looks for: tomatometerscore="92" (handles spaces/quotes variations)
+        const scoreMatch = data.match(/tomatometerscore\s*=\s*["'](\d+)["']/i);
         if (scoreMatch && scoreMatch[1]) {
             console.log(`> 🍅 Scrape Hit for "${title}": ${scoreMatch[1]}%`);
             return `${scoreMatch[1]}%`;
         }
     } catch (e) {
-        // console.log(`! RT Scrape Error: ${e.message}`);
+        // Silent error
     }
     return null;
 }
@@ -104,7 +105,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING SCRAPE ---');
+    console.log('--- STARTING SCRAPE (v6) ---');
     lastStatus = "Scraping Reddit...";
     
     let allPosts = [];
@@ -143,7 +144,7 @@ async function updateCatalog() {
         for (const p of allPosts) {
             const parsed = parseTitle(p.title);
             
-            // 1. Resolve to IMDb ID (Cinemeta)
+            // 1. Resolve to IMDb ID
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
             
             let rtScore = null;
@@ -155,8 +156,10 @@ async function updateCatalog() {
             }
 
             const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
-            // Make the score very obvious in the description
+            // Force text into description
             const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
+            // Hack: Put score in genres to force visibility in header
+            const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
 
             if (imdbItem) {
                 newCatalog.push({
@@ -165,7 +168,8 @@ async function updateCatalog() {
                     name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `${scoreDesc}${imdbItem.description || ''}`,
-                    releaseInfo: imdbItem.releaseInfo
+                    releaseInfo: imdbItem.releaseInfo,
+                    genres: genres // Displayed in the details header
                 });
             } else {
                 newCatalog.push({
@@ -174,7 +178,8 @@ async function updateCatalog() {
                     name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
-                    releaseInfo: parsed.year || '????'
+                    releaseInfo: parsed.year || '????',
+                    genres: genres
                 });
             }
             await delay(50);
@@ -220,13 +225,11 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     return { metas: [] };
 });
 
-// IMPORTANT: Returns custom metadata (with score) even for IMDb IDs
 builder.defineMetaHandler(({ type, id }) => {
     const item = movieCatalog.find(i => i.id === id);
     if (item) {
         return { meta: item };
     }
-    // If not in our list, return null so Stremio asks the next addon (Cinemeta)
     return { meta: null };
 });
 
@@ -234,3 +237,5 @@ serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000); 
 console.log(`Addon running on http://localhost:${PORT}`);
+
+
