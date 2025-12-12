@@ -13,7 +13,7 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v5',
-    version: '5.0.3', 
+    version: '5.0.5', 
     name: 'Reddit Movie Leaks (2 Months)',
     description: 'Scrapes r/MovieLeaks with OMDB/RT Scores.',
     resources: ['catalog'],
@@ -160,6 +160,8 @@ async function updateCatalog() {
             }
 
             const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
+            // Change: Added newline after score so it sits on top
+            const scoreDesc = rtScore ? `Rotten Tomatoes: ${rtScore}\n` : '';
 
             if (imdbItem) {
                 newCatalog.push({
@@ -167,7 +169,8 @@ async function updateCatalog() {
                     type: 'movie',
                     name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
-                    description: `(Verified) ${imdbItem.description || ''}`,
+                    // Change: Moved scoreDesc to the start
+                    description: `${scoreDesc}(Verified) ${imdbItem.description || ''}`,
                     releaseInfo: imdbItem.releaseInfo
                 });
             } else {
@@ -176,7 +179,8 @@ async function updateCatalog() {
                     type: 'movie',
                     name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
-                    description: `Unmatched Release: ${p.title}`,
+                    // Change: Moved scoreDesc to the start
+                    description: `${scoreDesc}Unmatched Release: ${p.title}`,
                     releaseInfo: parsed.year || '????'
                 });
             }
@@ -226,3 +230,5 @@ serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000); 
 console.log(`Addon running on http://localhost:${PORT}`);
+
+
