@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.2.1', 
-    name: 'Reddit Movie Leaks (Apex 67%)',
-    description: 'Scrapes r/MovieLeaks. Verified scores (Apex: 67%).',
+    version: '6.2.2', 
+    name: 'Reddit Movie Leaks (Smart Scores)',
+    description: 'Scrapes r/MovieLeaks. Restores missing scores using flexible matching.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -69,17 +69,28 @@ async function fetchRottenTomatoesFallback(title, year) {
             const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
             const nameMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
             
-            const rtYear = yearMatch ? yearMatch[1] : null;
+            const rtYear = yearMatch ? parseInt(yearMatch[1]) : null;
+            const targetYear = year ? parseInt(year) : null;
             const rtNameRaw = nameMatch ? nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim() : "";
             const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-            // STRICT MATCHING: Target year MUST be 2026 for the Brad Pitt Apex movie
-            const isApexExact = (cleanResult === 'apex' && rtYear === '2026');
-            const isGenericMatch = (cleanResult === cleanTarget && year && rtYear && year.toString() === rtYear.toString());
+            // 1. Title Flexibility: Does RT title include our title, or vice versa?
+            const isTitleMatch = cleanResult.includes(cleanTarget) || cleanTarget.includes(cleanResult);
+            
+            // 2. Year Flexibility: +/- 1 year tolerance (e.g., 2025 and 2026 match)
+            let isYearMatch = false;
+            if (targetYear && rtYear) {
+                isYearMatch = Math.abs(targetYear - rtYear) <= 1;
+            } else if (!targetYear) {
+                isYearMatch = true; // If we don't know the year, assume it matches if the title matches
+            }
 
-            if (isApexExact || isGenericMatch) {
-                if (scoreMatch) {
-                    console.log('Successfully fetched verified score: ' + rtNameRaw + ' (' + rtYear + ') -> ' + scoreMatch[1] + '%');
+            // 3. Strict Backup for generic titles like "Apex" or "They"
+            const isExactTitle = cleanResult === cleanTarget;
+
+            if ((isTitleMatch && isYearMatch) || isExactTitle) {
+                if (scoreMatch && scoreMatch[1] !== "") {
+                    console.log('--- SCORE RESTORED: ' + rtNameRaw + ' (' + rtYear + ') -> ' + scoreMatch[1] + '% ---');
                     return scoreMatch[1] + '%';
                 }
             }
@@ -111,7 +122,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING APEX 67% REFRESH (v6.2.1) ---');
+    console.log('--- STARTING SMART SCORE SCRAPE (v6.2.2) ---');
     lastStatus = "Scraping Reddit...";
     let allPosts = [];
     let afterToken = null;
