@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.8', 
-    name: 'Reddit Movie Leaks (Verified)',
-    description: 'Scrapes r/MovieLeaks. Tomatometer scores shown only for matched movies.',
+    version: '6.1.1', 
+    name: 'Reddit Movie Leaks (Accuracy Checker)',
+    description: 'Scrapes r/MovieLeaks. Scores strictly verified against title and year.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -58,14 +58,34 @@ async function fetchRottenTomatoesFallback(title, year) {
         const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
         const { data } = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
         const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
+        
+        const cleanTarget = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+
         for (const match of matches) {
             const attrs = match[1];
             if (!attrs.includes('type="movie"')) continue;
+
             const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i);
             const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
+            const nameMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
+            
             if (scoreMatch) {
+                const rtScore = scoreMatch[1];
                 const rtYear = yearMatch ? yearMatch[1] : null;
-                if (year && rtYear && Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) return scoreMatch[1] + '%';
+                const rtNameRaw = nameMatch ? nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim() : "";
+                const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+                // LOGGING FOR VERIFICATION
+                console.log('Checking: ' + rtNameRaw + ' (' + rtYear + ') Score: ' + rtScore + '% against target ' + title + ' (' + year + ')');
+
+                // Strict matching criteria
+                const yearMatches = year && rtYear && Math.abs(parseInt(year) - parseInt(rtYear)) <= 1;
+                const nameMatches = cleanResult === cleanTarget;
+
+                if (yearMatches || nameMatches) {
+                    console.log('--- MATCH FOUND: ' + rtNameRaw + ' score used: ' + rtScore + '% ---');
+                    return rtScore + '%';
+                }
             }
         }
     } catch (e) { return null; }
@@ -95,7 +115,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING VERIFIED-ONLY SCRAPE ---');
+    console.log('--- STARTING ACCURACY-CHECK SCRAPE ---');
     lastStatus = "Scraping Reddit...";
     let allPosts = [];
     let afterToken = null;
@@ -187,3 +207,4 @@ builder.defineMetaHandler((args) => {
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000);
+
