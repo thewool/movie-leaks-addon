@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.2.2', 
-    name: 'Reddit Movie Leaks (Smart Scores)',
-    description: 'Scrapes r/MovieLeaks. Restores missing scores using flexible matching.',
+    version: '6.2.4', 
+    name: 'Reddit Movie Leaks (Diagnostics)',
+    description: 'Scrapes r/MovieLeaks. Built-in network diagnostics for RT scores.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -56,9 +56,33 @@ async function fetchRottenTomatoesFallback(title, year) {
     try {
         const query = year ? title + ' ' + year : title;
         const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
-        const { data } = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
+        
+        let response;
+        try {
+            response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 8000 });
+        } catch (netError) {
+            console.log('🚨 [NETWORK ERROR] Failed to connect to RT for "' + title + '": ' + netError.message);
+            if (netError.response && netError.response.status === 403) {
+                 console.log('   -> This is a 403 Forbidden error. Rotten Tomatoes is actively blocking your Render IP.');
+            }
+            return null;
+        }
+
+        const data = response.data;
+
+        // 🚨 DIAGNOSTIC ALARMS 🚨
+        if (data.includes('Cloudflare') || data.includes('Verify you are human') || data.includes('captcha')) {
+            console.log('\n🚨 [FATAL ERROR] RENDER IP IS BLOCKED BY ROTTEN TOMATOES CLOUDFLARE! 🚨\n');
+            return null;
+        }
+
         const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
         
+        if (matches.length === 0) {
+            console.log('[HTML ERROR] RT changed their website layout. No media rows found for: ' + title);
+            return null;
+        }
+
         const cleanTarget = title.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         for (const match of matches) {
@@ -74,25 +98,24 @@ async function fetchRottenTomatoesFallback(title, year) {
             const rtNameRaw = nameMatch ? nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim() : "";
             const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-            // 1. Title Flexibility: Does RT title include our title, or vice versa?
             const isTitleMatch = cleanResult.includes(cleanTarget) || cleanTarget.includes(cleanResult);
             
-            // 2. Year Flexibility: +/- 1 year tolerance (e.g., 2025 and 2026 match)
             let isYearMatch = false;
             if (targetYear && rtYear) {
                 isYearMatch = Math.abs(targetYear - rtYear) <= 1;
             } else if (!targetYear) {
-                isYearMatch = true; // If we don't know the year, assume it matches if the title matches
+                isYearMatch = true; 
             }
 
-            // 3. Strict Backup for generic titles like "Apex" or "They"
             const isExactTitle = cleanResult === cleanTarget;
 
             if ((isTitleMatch && isYearMatch) || isExactTitle) {
-                if (scoreMatch && scoreMatch[1] !== "") {
-                    console.log('--- SCORE RESTORED: ' + rtNameRaw + ' (' + rtYear + ') -> ' + scoreMatch[1] + '% ---');
-                    return scoreMatch[1] + '%';
+                if (!scoreMatch || scoreMatch[1] === "") {
+                     console.log('[DATA ERROR] Found movie "' + rtNameRaw + '" but RT HTML is missing the score attribute.');
+                     return null;
                 }
+                console.log('--- SCORE RESTORED: ' + rtNameRaw + ' -> ' + scoreMatch[1] + '% ---');
+                return scoreMatch[1] + '%';
             }
         }
     } catch (e) { return null; }
@@ -122,7 +145,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING SMART SCORE SCRAPE (v6.2.2) ---');
+    console.log('--- STARTING DIAGNOSTIC SCRAPE (v6.2.4) ---');
     lastStatus = "Scraping Reddit...";
     let allPosts = [];
     let afterToken = null;
