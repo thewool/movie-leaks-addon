@@ -12,17 +12,17 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; 
 
 const manifest = {
-    id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.2', // Bumped version for strict accuracy
-    name: 'Reddit Movie Leaks (with Scores)',
-    description: 'Scrapes r/MovieLeaks. STRICT TOMATOMETER SCORES.',
+    id: 'org.reddit.movieleaks.v7', 
+    version: '7.0.0', // Bumped version to break Android TV cache
+    name: 'Reddit Movie Leaks (TV Scores)',
+    description: 'Scrapes r/MovieLeaks. Android TV cache-breaker with prominent scores.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
     catalogs: [
         {
             type: 'movie',
-            id: 'movieleaks_long',
+            id: 'movieleaks_scores_tv', // CHANGED CATALOG ID TO FORCE CACHE REFRESH
             name: 'Movie Leaks',
             extra: [{ name: 'skip' }]
         }
@@ -168,7 +168,7 @@ async function updateCatalog() {
             afterToken = response.data.data.after;
             if (!afterToken) keepFetching = false;
             page++;
-            if (keepFetching) await delay(1500); 
+            if (keepFetching) await delay(1000); // Reduced delay for faster initial Reddit fetch
         }
 
         console.log(`> Found ${allPosts.length} posts. Processing...`);
@@ -183,36 +183,47 @@ async function updateCatalog() {
             // KEY FIX: Use Cinemeta's year if Reddit post didn't have one
             const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
 
-            let rtScore = null;
-            if (imdbItem) {
-                rtScore = await fetchScoresFromOmdb(imdbItem.id);
-            }
-            if (!rtScore) {
-                rtScore = await fetchRottenTomatoesFallback(parsed.title, actualYear);
-            }
+            // SPEED & ACCURACY FIX: Check RT first as primary source of truth, run OMDB concurrently as backup
+            const [rtPrimaryScore, omdbScore] = await Promise.all([
+                fetchRottenTomatoesFallback(parsed.title, actualYear),
+                imdbItem ? fetchScoresFromOmdb(imdbItem.id) : null
+            ]);
 
-            const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
-            const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
-            const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
+            // Prefer live RT score over outdated OMDB cache
+            let rtScore = rtPrimaryScore || omdbScore;
+            
+            // Format score correctly to avoid double percentages
+            const cleanScore = rtScore ? rtScore.replace('%', '') + '%' : null;
+
+            const scorePrefix = cleanScore ? `🍅 ${cleanScore} ` : '';
+            const scoreDesc = cleanScore ? `⭐️ ROTTEN TOMATOES: ${cleanScore} ⭐️\n\n` : '';
+            const genres = cleanScore ? [`RT: ${cleanScore}`, 'Movie Leaks'] : ['Movie Leaks'];
+
+            // ANDROID TV CACHE & UI FIX: 
+            // TV UI truncates things. We use a distinct pipe '|' and force a fresh cache badge.
+            const displayYear = (imdbItem && imdbItem.releaseInfo) ? imdbItem.releaseInfo : (actualYear || '????');
+            const tvBadge = cleanScore ? `🍅 ${cleanScore} • ${displayYear}` : displayYear;
+            
+            const nameWithScore = cleanScore ? `🍅 ${cleanScore} | ` : '';
 
             if (imdbItem) {
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: `${scorePrefix}${imdbItem.name}`,
+                    name: `${nameWithScore}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `${scoreDesc}${imdbItem.description || ''}`,
-                    releaseInfo: imdbItem.releaseInfo,
+                    releaseInfo: tvBadge,
                     genres: genres 
                 });
             } else {
                 newCatalog.push({
                     id: `leaks_${p.id}`,
                     type: 'movie',
-                    name: `${scorePrefix}${parsed.title}`,
+                    name: `${nameWithScore}${parsed.title}`,
                     poster: null, 
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
-                    releaseInfo: parsed.year || '????',
+                    releaseInfo: tvBadge,
                     genres: genres
                 });
             }
@@ -252,7 +263,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
             }]
         };
     }
-    if (type === 'movie' && id === 'movieleaks_long') {
+    if (type === 'movie' && id === 'movieleaks_scores_tv') {
         const skip = extra.skip ? parseInt(extra.skip) : 0;
         return { metas: movieCatalog.slice(skip, skip + 100) };
     }
