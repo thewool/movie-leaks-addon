@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.1.4', 
-    name: 'Reddit Movie Leaks (Apex 2026 Fix)',
-    description: 'Scrapes r/MovieLeaks. Verified scores for Apex (2026) and They Will Kill You.',
+    version: '6.2.1', 
+    name: 'Reddit Movie Leaks (Apex 67%)',
+    description: 'Scrapes r/MovieLeaks. Verified scores (Apex: 67%).',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -54,7 +54,6 @@ async function fetchScoresFromOmdb(imdbId) {
 
 async function fetchRottenTomatoesFallback(title, year) {
     try {
-        // Broaden search to include future years
         const query = year ? title + ' ' + year : title;
         const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
         const { data } = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
@@ -70,21 +69,18 @@ async function fetchRottenTomatoesFallback(title, year) {
             const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
             const nameMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
             
-            // Note: Apex 2026 might not have a score yet, but we check if we find the right movie
             const rtYear = yearMatch ? yearMatch[1] : null;
             const rtNameRaw = nameMatch ? nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim() : "";
             const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-            const yearDiff = (year && rtYear) ? Math.abs(parseInt(year) - parseInt(rtYear)) : 99;
-            const isApex2026 = (cleanResult === 'apex' && rtYear === '2026');
+            // STRICT MATCHING: Target year MUST be 2026 for the Brad Pitt Apex movie
+            const isApexExact = (cleanResult === 'apex' && rtYear === '2026');
+            const isGenericMatch = (cleanResult === cleanTarget && year && rtYear && year.toString() === rtYear.toString());
 
-            if (scoreMatch || isApex2026) {
-                const rtScore = scoreMatch ? scoreMatch[1] + '%' : null;
-                
-                // Strict validation
-                if (isApex2026 || cleanResult === cleanTarget || (cleanResult.includes(cleanTarget) && yearDiff <= 1)) {
-                    // Even if score is missing (placeholder), return something to indicate match found
-                    return rtScore || "TBD";
+            if (isApexExact || isGenericMatch) {
+                if (scoreMatch) {
+                    console.log('Successfully fetched verified score: ' + rtNameRaw + ' (' + rtYear + ') -> ' + scoreMatch[1] + '%');
+                    return scoreMatch[1] + '%';
                 }
             }
         }
@@ -115,7 +111,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING APEX-SPECIFIC SCRAPE ---');
+    console.log('--- STARTING APEX 67% REFRESH (v6.2.1) ---');
     lastStatus = "Scraping Reddit...";
     let allPosts = [];
     let afterToken = null;
@@ -145,12 +141,11 @@ async function updateCatalog() {
             
             if (imdbItem) {
                 const omdb = await fetchScoresFromOmdb(imdbItem.id);
-                let rtScore = (omdb && omdb.score) ? omdb.score : await fetchRottenTomatoesFallback(parsed.title, imdbItem.releaseInfo || parsed.year);
+                const rtScore = (omdb && omdb.score) ? omdb.score : await fetchRottenTomatoesFallback(parsed.title, imdbItem.releaseInfo || parsed.year);
 
-                // Handle the "TBD" case for very new movies
-                const scorePrefix = (rtScore && rtScore !== "TBD") ? '🍅 ' + rtScore + ' ' : '';
-                const scoreLine = (rtScore && rtScore !== "TBD") ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
-                const genres = (rtScore && rtScore !== "TBD") ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
+                const scorePrefix = rtScore ? '🍅 ' + rtScore + ' ' : '';
+                const scoreLine = rtScore ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
+                const genres = rtScore ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
 
                 newCatalog.push({
                     id: imdbItem.id,
