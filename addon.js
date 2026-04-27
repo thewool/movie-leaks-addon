@@ -13,9 +13,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.3', // Bumped version: RT Priority Update
-    name: 'Reddit Movie Leaks (Live RT Scores)',
-    description: 'Scrapes r/MovieLeaks. Checks live Rotten Tomatoes first for accuracy.',
+    version: '6.0.4', // Bumped version for Speed & Parallel Processing
+    name: 'Reddit Movie Leaks (Turbo)',
+    description: 'Scrapes r/MovieLeaks. High-speed parallel scraping with live RT scores.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -67,11 +67,9 @@ async function fetchRottenTomatoesPrimary(title, year) {
                     if (year && rtYear) {
                         // Allow +/- 1 year for festival releases vs wide releases
                         if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) {
-                            console.log(`> 🍅 LIVE RT Hit for "${title}" (${rtYear}): ${score}%`);
                             return `${score}%`;
                         }
                     } else {
-                        console.log(`> 🍅 LIVE RT Hit (No Year Info) for "${title}": ${score}%`);
                         return `${score}%`;
                     }
                 }
@@ -93,7 +91,6 @@ async function fetchScoresFromOmdb(imdbId) {
         if (data && data.Response === 'True' && data.Ratings) {
             const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
             if (rt) {
-                console.log(`> 🔄 OMDB Fallback Hit for ${imdbId}: ${rt.Value}`);
                 return rt.Value;
             }
         }
@@ -130,8 +127,8 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING SCRAPE (v6.0.3) ---');
-    lastStatus = "Scraping Reddit...";
+    console.log('--- STARTING TURBO SCRAPE (v6.0.4) ---');
+    lastStatus = "Fetching Reddit...";
     
     let allPosts = [];
     let afterToken = null;
@@ -141,7 +138,6 @@ async function updateCatalog() {
 
     try {
         while (keepFetching) {
-            console.log(`> Fetching Page ${page}...`);
             const url = `${SUBREDDIT_URL}?limit=100&after=${afterToken || ''}`;
             const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 8000 });
             const children = response.data.data.children;
@@ -159,30 +155,42 @@ async function updateCatalog() {
             afterToken = response.data.data.after;
             if (!afterToken) keepFetching = false;
             page++;
-            if (keepFetching) await delay(1500); 
+            if (keepFetching) await delay(1000); 
         }
 
-        console.log(`> Found ${allPosts.length} posts. Processing...`);
-        lastStatus = `Processing ${allPosts.length} items...`;
+        console.log(`> Found ${allPosts.length} posts. Processing in Parallel...`);
         const newCatalog = [];
 
-        for (const p of allPosts) {
+        for (let i = 0; i < allPosts.length; i++) {
+            const p = allPosts[i];
             const parsed = parseTitle(p.title);
             
-            const imdbItem = await resolveToImdb(parsed.title, parsed.year);
-            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
+            // Update status dynamically so Stremio shows progress
+            if (i % 10 === 0) {
+                 lastStatus = `Scraping scores... (${i}/${allPosts.length})`;
+            }
 
-            // KEY FIX: Always ask Rotten Tomatoes FIRST
-            let rtScore = await fetchRottenTomatoesPrimary(parsed.title, actualYear);
+            // SPEED FIX: Run IMDB resolution AND Rotten Tomatoes scrape at the EXACT same time
+            const [imdbItem, rtPrimaryScore] = await Promise.all([
+                resolveToImdb(parsed.title, parsed.year),
+                fetchRottenTomatoesPrimary(parsed.title, parsed.year)
+            ]);
+            
+            let rtScore = rtPrimaryScore;
             
             // If RT fails or returns nothing, use OMDB as a backup
             if (!rtScore && imdbItem) {
                 rtScore = await fetchScoresFromOmdb(imdbItem.id);
             }
 
-            const scorePrefix = rtScore ? `🍅 ${rtScore.replace('%', '')}% ` : ''; // Ensure clean formatting
+            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
+            const scorePrefix = rtScore ? `🍅 ${rtScore.replace('%', '')}% ` : ''; 
             const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
             const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
+
+            // ANDROID FIX: Put the score in 'releaseInfo' so it displays as a highly visible badge on the poster!
+            const displayYear = (imdbItem && imdbItem.releaseInfo) ? imdbItem.releaseInfo : (actualYear || '????');
+            const androidBadge = rtScore ? `🍅 ${rtScore.replace('%', '')}% • ${displayYear}` : displayYear;
 
             if (imdbItem) {
                 newCatalog.push({
@@ -191,7 +199,7 @@ async function updateCatalog() {
                     name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `${scoreDesc}${imdbItem.description || ''}`,
-                    releaseInfo: imdbItem.releaseInfo,
+                    releaseInfo: androidBadge,
                     genres: genres 
                 });
             } else {
@@ -201,11 +209,13 @@ async function updateCatalog() {
                     name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
-                    releaseInfo: parsed.year || '????',
+                    releaseInfo: androidBadge,
                     genres: genres
                 });
             }
-            await delay(100);
+            
+            // Tiny delay to prevent getting blocked by Cloudflare, but much faster than before
+            await delay(50);
         }
 
         const uniqueCatalog = [];
@@ -219,7 +229,7 @@ async function updateCatalog() {
 
         movieCatalog = uniqueCatalog;
         lastStatus = "Ready";
-        console.log(`> Update Complete. Catalog size: ${movieCatalog.length}`);
+        console.log(`> Turbo Update Complete. Catalog size: ${movieCatalog.length}`);
 
     } catch (error) {
         console.error('! Error:', error.message);
