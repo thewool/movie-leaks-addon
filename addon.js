@@ -1,4 +1,3 @@
-```javascript
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 
@@ -13,7 +12,7 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.3', // Bumped version
+    version: '6.0.4', 
     name: 'Reddit Movie Leaks (with Scores)',
     description: 'Scrapes r/MovieLeaks with verified scores.',
     idPrefixes: ['tt', 'leaks'], 
@@ -35,11 +34,9 @@ let lastStatus = "Initializing...";
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- 1. OMDB Fetcher (Rewritten to avoid backtick syntax errors) ---
 async function fetchScoresFromOmdb(imdbId) {
     if (!imdbId) return null;
     try {
-        // Using standard concatenation to avoid template literal backtick issues
         const url = 'http://www.omdbapi.com/?apikey=' + OMDB_API_KEY + '&i=' + imdbId;
         const { data } = await axios.get(url);
 
@@ -53,7 +50,6 @@ async function fetchScoresFromOmdb(imdbId) {
     return null;
 }
 
-// --- 2. RT Direct Fetcher (Fallback) ---
 async function fetchRottenTomatoesFallback(title, year) {
     try {
         const query = year ? title + ' ' + year : title;
@@ -203,5 +199,3 @@ builder.defineMetaHandler(({ type, id }) => {
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000);
-
-```
