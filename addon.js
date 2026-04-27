@@ -8,13 +8,14 @@ const CINEMETA_URL = 'https://v3-cinemeta.strem.io/catalog/movie/top';
 const OMDB_API_KEY = 'a8924bd9'; 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+// 60 days in milliseconds
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; 
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.2.4', 
-    name: 'Reddit Movie Leaks (Diagnostics)',
-    description: 'Scrapes r/MovieLeaks. Built-in network diagnostics for RT scores.',
+    version: '6.0.3', // Bumped version: RT Priority Update
+    name: 'Reddit Movie Leaks (Live RT Scores)',
+    description: 'Scrapes r/MovieLeaks. Checks live Rotten Tomatoes first for accuracy.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -34,91 +35,71 @@ let lastStatus = "Initializing...";
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function fetchScoresFromOmdb(imdbId) {
-    if (!imdbId) return null;
+// --- 1. RT Direct Fetcher (PRIMARY - Source of Truth) ---
+async function fetchRottenTomatoesPrimary(title, year) {
     try {
-        const url = 'http://www.omdbapi.com/?apikey=' + OMDB_API_KEY + '&i=' + imdbId;
-        const { data } = await axios.get(url);
-
-        if (data && data.Response === 'True' && data.Ratings) {
-            const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
-            return {
-                score: rt ? rt.Value : null,
-                plot: data.Plot !== 'N/A' ? data.Plot : null,
-                poster: data.Poster !== 'N/A' ? data.Poster : null
-            };
-        }
-    } catch (e) { return null; }
-    return null;
-}
-
-async function fetchRottenTomatoesFallback(title, year) {
-    try {
-        const query = year ? title + ' ' + year : title;
-        const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
-        
-        let response;
-        try {
-            response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 8000 });
-        } catch (netError) {
-            console.log('🚨 [NETWORK ERROR] Failed to connect to RT for "' + title + '": ' + netError.message);
-            if (netError.response && netError.response.status === 403) {
-                 console.log('   -> This is a 403 Forbidden error. Rotten Tomatoes is actively blocking your Render IP.');
-            }
-            return null;
-        }
-
-        const data = response.data;
-
-        // 🚨 DIAGNOSTIC ALARMS 🚨
-        if (data.includes('Cloudflare') || data.includes('Verify you are human') || data.includes('captcha')) {
-            console.log('\n🚨 [FATAL ERROR] RENDER IP IS BLOCKED BY ROTTEN TOMATOES CLOUDFLARE! 🚨\n');
-            return null;
-        }
+        const query = year ? `${title} ${year}` : title;
+        const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
+        const { data } = await axios.get(url, { 
+            headers: { 'User-Agent': USER_AGENT },
+            timeout: 5000 // Prevent hanging
+        });
 
         const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
-        
-        if (matches.length === 0) {
-            console.log('[HTML ERROR] RT changed their website layout. No media rows found for: ' + title);
-            return null;
-        }
-
         const cleanTarget = title.toLowerCase().replace(/[^a-z0-9]/g, '');
-
+        
         for (const match of matches) {
             const attrs = match[1];
-            if (!attrs.includes('type="movie"')) continue;
-
-            const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i);
+            
+            const isMovie = attrs.includes('data-type="movie"') || attrs.includes('type="movie"');
+            const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i); 
             const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
             const nameMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
             
-            const rtYear = yearMatch ? parseInt(yearMatch[1]) : null;
-            const targetYear = year ? parseInt(year) : null;
-            const rtNameRaw = nameMatch ? nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim() : "";
-            const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (isMovie && scoreMatch && nameMatch) {
+                const score = scoreMatch[1];
+                const rtYear = yearMatch ? yearMatch[1] : null;
+                const rtNameRaw = nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim();
+                const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-            const isTitleMatch = cleanResult.includes(cleanTarget) || cleanTarget.includes(cleanResult);
-            
-            let isYearMatch = false;
-            if (targetYear && rtYear) {
-                isYearMatch = Math.abs(targetYear - rtYear) <= 1;
-            } else if (!targetYear) {
-                isYearMatch = true; 
-            }
-
-            const isExactTitle = cleanResult === cleanTarget;
-
-            if ((isTitleMatch && isYearMatch) || isExactTitle) {
-                if (!scoreMatch || scoreMatch[1] === "") {
-                     console.log('[DATA ERROR] Found movie "' + rtNameRaw + '" but RT HTML is missing the score attribute.');
-                     return null;
+                // STRICT: Title must be an exact alphanumeric match
+                if (cleanResult === cleanTarget) {
+                    if (year && rtYear) {
+                        // Allow +/- 1 year for festival releases vs wide releases
+                        if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) {
+                            console.log(`> 🍅 LIVE RT Hit for "${title}" (${rtYear}): ${score}%`);
+                            return `${score}%`;
+                        }
+                    } else {
+                        console.log(`> 🍅 LIVE RT Hit (No Year Info) for "${title}": ${score}%`);
+                        return `${score}%`;
+                    }
                 }
-                console.log('--- SCORE RESTORED: ' + rtNameRaw + ' -> ' + scoreMatch[1] + '% ---');
-                return scoreMatch[1] + '%';
             }
         }
-    } catch (e) { return null; }
+    } catch (e) {
+        // Silent error, fall back to OMDB
+    }
+    return null;
+}
+
+// --- 2. OMDB Fetcher (SECONDARY / FALLBACK) ---
+async function fetchScoresFromOmdb(imdbId) {
+    if (!imdbId) return null;
+    try {
+        const url = `http://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${imdbId}`;
+        const { data } = await axios.get(url, { timeout: 5000 });
+
+        if (data && data.Response === 'True' && data.Ratings) {
+            const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
+            if (rt) {
+                console.log(`> 🔄 OMDB Fallback Hit for ${imdbId}: ${rt.Value}`);
+                return rt.Value;
+            }
+        }
+    } catch (e) {
+        // Silent error
+    }
     return null;
 }
 
@@ -136,104 +117,146 @@ function parseTitle(rawTitle) {
 
 async function resolveToImdb(title, year) {
     try {
-        const query = year ? title + ' ' + year : title;
-        const url = CINEMETA_URL + '/search=' + encodeURIComponent(query) + '.json';
-        const { data } = await axios.get(url);
-        if (data && data.metas && data.metas.length > 0) return data.metas[0];
-    } catch (e) { return null; }
+        const query = year ? `${title} ${year}` : title;
+        const url = `${CINEMETA_URL}/search=${encodeURIComponent(query)}.json`;
+        const { data } = await axios.get(url, { timeout: 5000 });
+        if (data && data.metas && data.metas.length > 0) {
+            return data.metas[0];
+        }
+    } catch (e) {
+        return null;
+    }
     return null;
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING DIAGNOSTIC SCRAPE (v6.2.4) ---');
+    console.log('--- STARTING SCRAPE (v6.0.3) ---');
     lastStatus = "Scraping Reddit...";
+    
     let allPosts = [];
     let afterToken = null;
     let keepFetching = true;
+    let page = 1;
     const cutoffDateSeconds = Math.floor((Date.now() - MAX_AGE_MS) / 1000);
 
     try {
         while (keepFetching) {
-            const url = SUBREDDIT_URL + '?limit=100&after=' + (afterToken || '');
-            const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
+            console.log(`> Fetching Page ${page}...`);
+            const url = `${SUBREDDIT_URL}?limit=100&after=${afterToken || ''}`;
+            const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 8000 });
             const children = response.data.data.children;
-            if (!children || children.length === 0) break;
+            
+            if (children.length === 0) { keepFetching = false; break; }
+
             for (const child of children) {
                 const p = child.data;
-                if (p.created_utc < cutoffDateSeconds) { keepFetching = false; break; }
+                if (p.created_utc < cutoffDateSeconds) {
+                    keepFetching = false;
+                    break; 
+                }
                 allPosts.push(p);
             }
             afterToken = response.data.data.after;
-            if (!afterToken) break;
-            await delay(1500); 
+            if (!afterToken) keepFetching = false;
+            page++;
+            if (keepFetching) await delay(1500); 
         }
 
+        console.log(`> Found ${allPosts.length} posts. Processing...`);
+        lastStatus = `Processing ${allPosts.length} items...`;
         const newCatalog = [];
+
         for (const p of allPosts) {
             const parsed = parseTitle(p.title);
-            const imdbItem = await resolveToImdb(parsed.title, parsed.year);
             
+            const imdbItem = await resolveToImdb(parsed.title, parsed.year);
+            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
+
+            // KEY FIX: Always ask Rotten Tomatoes FIRST
+            let rtScore = await fetchRottenTomatoesPrimary(parsed.title, actualYear);
+            
+            // If RT fails or returns nothing, use OMDB as a backup
+            if (!rtScore && imdbItem) {
+                rtScore = await fetchScoresFromOmdb(imdbItem.id);
+            }
+
+            const scorePrefix = rtScore ? `🍅 ${rtScore.replace('%', '')}% ` : ''; // Ensure clean formatting
+            const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
+            const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
+
             if (imdbItem) {
-                const omdb = await fetchScoresFromOmdb(imdbItem.id);
-                const rtScore = (omdb && omdb.score) ? omdb.score : await fetchRottenTomatoesFallback(parsed.title, imdbItem.releaseInfo || parsed.year);
-
-                const scorePrefix = rtScore ? '🍅 ' + rtScore + ' ' : '';
-                const scoreLine = rtScore ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
-                const genres = rtScore ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
-
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: scorePrefix + imdbItem.name,
-                    poster: (omdb && omdb.poster) || imdbItem.poster || 'https://images.metahub.space/poster/medium/' + imdbItem.id + '/img',
-                    description: scoreLine + ((omdb && omdb.plot) || imdbItem.description || ''),
-                    releaseInfo: imdbItem.releaseInfo || parsed.year,
+                    name: `${scorePrefix}${imdbItem.name}`,
+                    poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
+                    description: `${scoreDesc}${imdbItem.description || ''}`,
+                    releaseInfo: imdbItem.releaseInfo,
                     genres: genres 
                 });
             } else {
                 newCatalog.push({
-                    id: 'leaks_' + p.id,
+                    id: `leaks_${p.id}`,
                     type: 'movie',
-                    name: parsed.title,
+                    name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
-                    description: 'Unmatched Release: ' + p.title,
+                    description: `${scoreDesc}Unmatched Release: ${p.title}`,
                     releaseInfo: parsed.year || '????',
-                    genres: ['Unmatched']
+                    genres: genres
                 });
             }
-            await delay(100); 
+            await delay(100);
         }
 
+        const uniqueCatalog = [];
         const seenIds = new Set();
-        movieCatalog = newCatalog.filter(item => {
-            const duplicate = seenIds.has(item.id);
-            seenIds.add(item.id);
-            return !duplicate;
-        });
+        for (const item of newCatalog) {
+            if (!seenIds.has(item.id)) {
+                seenIds.add(item.id);
+                uniqueCatalog.push(item);
+            }
+        }
 
+        movieCatalog = uniqueCatalog;
         lastStatus = "Ready";
-        console.log('Update Complete. Catalog size: ' + movieCatalog.length);
+        console.log(`> Update Complete. Catalog size: ${movieCatalog.length}`);
+
     } catch (error) {
-        lastStatus = 'Error: ' + error.message;
+        console.error('! Error:', error.message);
+        lastStatus = `Error: ${error.message}`;
     }
 }
 
-builder.defineCatalogHandler(async (args) => {
+// --- Handlers ---
+
+builder.defineCatalogHandler(async ({ type, id, extra }) => {
     if (movieCatalog.length === 0) {
-        return { metas: [{ id: 'tt_status', type: 'movie', name: 'Status: ' + lastStatus, description: "Wait for fetch...", poster: 'https://via.placeholder.com/300x450.png?text=Loading...' }] };
+        return {
+            metas: [{
+                id: 'tt_status',
+                type: 'movie',
+                name: `Status: ${lastStatus}`,
+                description: "Fetching data...",
+                poster: 'https://via.placeholder.com/300x450.png?text=Loading...',
+            }]
+        };
     }
-    if (args.type === 'movie' && args.id === 'movieleaks_long') {
-        const skip = args.extra && args.extra.skip ? parseInt(args.extra.skip) : 0;
+    if (type === 'movie' && id === 'movieleaks_long') {
+        const skip = extra.skip ? parseInt(extra.skip) : 0;
         return { metas: movieCatalog.slice(skip, skip + 100) };
     }
     return { metas: [] };
 });
 
-builder.defineMetaHandler((args) => {
-    const item = movieCatalog.find(i => i.id === args.id);
-    return Promise.resolve(item ? { meta: item } : { meta: null });
+builder.defineMetaHandler(({ type, id }) => {
+    const item = movieCatalog.find(i => i.id === id);
+    if (item) {
+        return { meta: item };
+    }
+    return { meta: null };
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
-setInterval(updateCatalog, 60 * 60 * 1000);
+setInterval(updateCatalog, 60 * 60 * 1000); 
+console.log(`Addon running on http://localhost:${PORT}`);
