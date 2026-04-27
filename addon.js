@@ -13,9 +13,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.2',
+    version: '6.0.3', // Bumped version
     name: 'Reddit Movie Leaks (with Scores)',
-    description: 'Scrapes r/MovieLeaks. STRICT TOMATOMETER SCORES.',
+    description: 'Scrapes r/MovieLeaks with verified scores.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -35,11 +35,12 @@ let lastStatus = "Initializing...";
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- 1. OMDB Fetcher ---
+// --- 1. OMDB Fetcher (Rewritten to avoid backtick syntax errors) ---
 async function fetchScoresFromOmdb(imdbId) {
     if (!imdbId) return null;
     try {
-        const url = `http://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${imdbId}`;
+        // Using standard concatenation to avoid template literal backtick issues
+        const url = 'http://www.omdbapi.com/?apikey=' + OMDB_API_KEY + '&i=' + imdbId;
         const { data } = await axios.get(url);
 
         if (data && data.Response === 'True' && data.Ratings) {
@@ -52,11 +53,11 @@ async function fetchScoresFromOmdb(imdbId) {
     return null;
 }
 
-// --- 2. RT Direct Fetcher (STRICT) ---
+// --- 2. RT Direct Fetcher (Fallback) ---
 async function fetchRottenTomatoesFallback(title, year) {
     try {
-        const query = year ? `${title} ${year}` : title;
-        const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
+        const query = year ? title + ' ' + year : title;
+        const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
         const { data } = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
 
         const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
@@ -72,9 +73,9 @@ async function fetchRottenTomatoesFallback(title, year) {
                 const rtYear = yearMatch ? yearMatch[1] : null;
 
                 if (year && rtYear) {
-                    if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) return `${score}%`;
+                    if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) return score + '%';
                 } else if (!year) {
-                    return `${score}%`;
+                    return score + '%';
                 }
             }
         }
@@ -96,8 +97,8 @@ function parseTitle(rawTitle) {
 
 async function resolveToImdb(title, year) {
     try {
-        const query = year ? `${title} ${year}` : title;
-        const url = `${CINEMETA_URL}/search=${encodeURIComponent(query)}.json`;
+        const query = year ? title + ' ' + year : title;
+        const url = CINEMETA_URL + '/search=' + encodeURIComponent(query) + '.json';
         const { data } = await axios.get(url);
         if (data && data.metas && data.metas.length > 0) return data.metas[0];
     } catch (e) { return null; }
@@ -114,7 +115,7 @@ async function updateCatalog() {
 
     try {
         while (keepFetching) {
-            const url = `${SUBREDDIT_URL}?limit=100&after=${afterToken || ''}`;
+            const url = SUBREDDIT_URL + '?limit=100&after=' + (afterToken || '');
             const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
             const children = response.data.data.children;
             if (children.length === 0) break;
@@ -141,27 +142,27 @@ async function updateCatalog() {
             let rtScore = imdbItem ? await fetchScoresFromOmdb(imdbItem.id) : null;
             if (!rtScore) rtScore = await fetchRottenTomatoesFallback(parsed.title, actualYear);
 
-            const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
-            const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
-            const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
+            const scorePrefix = rtScore ? '🍅 ' + rtScore + ' ' : '';
+            const scoreDesc = rtScore ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
+            const genres = rtScore ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
 
             if (imdbItem) {
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: `${scorePrefix}${imdbItem.name}`,
-                    poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
-                    description: `${scoreDesc}${imdbItem.description || ''}`,
+                    name: scorePrefix + imdbItem.name,
+                    poster: 'https://images.metahub.space/poster/medium/' + imdbItem.id + '/img',
+                    description: scoreDesc + (imdbItem.description || ''),
                     releaseInfo: imdbItem.releaseInfo,
                     genres: genres 
                 });
             } else {
                 newCatalog.push({
-                    id: `leaks_${p.id}`,
+                    id: 'leaks_' + p.id,
                     type: 'movie',
-                    name: `${scorePrefix}${parsed.title}`,
+                    name: scorePrefix + parsed.title,
                     poster: null, 
-                    description: `${scoreDesc}Unmatched Release: ${p.title}`,
+                    description: scoreDesc + 'Unmatched Release: ' + p.title,
                     releaseInfo: parsed.year || '????',
                     genres: genres
                 });
@@ -177,15 +178,15 @@ async function updateCatalog() {
         });
 
         lastStatus = "Ready";
-        console.log(`Update Complete. Catalog size: ${movieCatalog.length}`);
+        console.log('Update Complete. Catalog size: ' + movieCatalog.length);
     } catch (error) {
-        lastStatus = `Error: ${error.message}`;
+        lastStatus = 'Error: ' + error.message;
     }
 }
 
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     if (movieCatalog.length === 0) {
-        return { metas: [{ id: 'tt_status', type: 'movie', name: `Status: ${lastStatus}`, description: "Wait for fetch...", poster: 'https://via.placeholder.com/300x450.png?text=Loading...' }] };
+        return { metas: [{ id: 'tt_status', type: 'movie', name: 'Status: ' + lastStatus, description: "Wait for fetch...", poster: 'https://via.placeholder.com/300x450.png?text=Loading...' }] };
     }
     if (type === 'movie' && id === 'movieleaks_long') {
         const skip = extra.skip ? parseInt(extra.skip) : 0;
@@ -202,6 +203,5 @@ builder.defineMetaHandler(({ type, id }) => {
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000);
-
 
 ```
