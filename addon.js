@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.4', 
-    name: 'Reddit Movie Leaks (with Scores)',
-    description: 'Scrapes r/MovieLeaks with verified scores.',
+    version: '6.0.7', 
+    name: 'Reddit Movie Leaks (Verified)',
+    description: 'Scrapes r/MovieLeaks. Scores only shown for matched movies.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -42,11 +42,14 @@ async function fetchScoresFromOmdb(imdbId) {
 
         if (data && data.Response === 'True' && data.Ratings) {
             const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
-            if (rt) return rt.Value;
+            // Returns an object so we can use the plot/poster if available
+            return {
+                score: rt ? rt.Value : null,
+                plot: data.Plot !== 'N/A' ? data.Plot : null,
+                poster: data.Poster !== 'N/A' ? data.Poster : null
+            };
         }
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
     return null;
 }
 
@@ -55,24 +58,15 @@ async function fetchRottenTomatoesFallback(title, year) {
         const query = year ? title + ' ' + year : title;
         const url = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(query);
         const { data } = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
-
         const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
-        
         for (const match of matches) {
             const attrs = match[1];
-            const isMovie = attrs.includes('type="movie"');
+            if (!attrs.includes('type="movie"')) continue;
             const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i);
             const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
-            
-            if (isMovie && scoreMatch) {
-                const score = scoreMatch[1];
+            if (scoreMatch) {
                 const rtYear = yearMatch ? yearMatch[1] : null;
-
-                if (year && rtYear) {
-                    if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) return score + '%';
-                } else if (!year) {
-                    return score + '%';
-                }
+                if (year && rtYear && Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) return scoreMatch[1] + '%';
             }
         }
     } catch (e) { return null; }
@@ -102,7 +96,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING SCRAPE ---');
+    console.log('--- STARTING VERIFIED-ONLY SCRAPE ---');
     lastStatus = "Scraping Reddit...";
     let allPosts = [];
     let afterToken = null;
@@ -114,14 +108,10 @@ async function updateCatalog() {
             const url = SUBREDDIT_URL + '?limit=100&after=' + (afterToken || '');
             const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
             const children = response.data.data.children;
-            if (children.length === 0) break;
-
+            if (!children || children.length === 0) break;
             for (const child of children) {
                 const p = child.data;
-                if (p.created_utc < cutoffDateSeconds) {
-                    keepFetching = false;
-                    break; 
-                }
+                if (p.created_utc < cutoffDateSeconds) { keepFetching = false; break; }
                 allPosts.push(p);
             }
             afterToken = response.data.data.after;
@@ -133,37 +123,36 @@ async function updateCatalog() {
         for (const p of allPosts) {
             const parsed = parseTitle(p.title);
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
-            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
-
-            let rtScore = imdbItem ? await fetchScoresFromOmdb(imdbItem.id) : null;
-            if (!rtScore) rtScore = await fetchRottenTomatoesFallback(parsed.title, actualYear);
-
-            const scorePrefix = rtScore ? '🍅 ' + rtScore + ' ' : '';
-            const scoreDesc = rtScore ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
-            const genres = rtScore ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
-
+            
             if (imdbItem) {
+                const omdb = await fetchScoresFromOmdb(imdbItem.id);
+                const rtScore = (omdb && omdb.score) ? omdb.score : await fetchRottenTomatoesFallback(parsed.title, imdbItem.releaseInfo || parsed.year);
+
+                const scorePrefix = rtScore ? '🍅 ' + rtScore + ' ' : '';
+                const scoreLine = rtScore ? '⭐️ ROTTEN TOMATOES: ' + rtScore + ' ⭐️\n\n' : '';
+                const genres = rtScore ? ['RT: ' + rtScore, 'Movie Leaks'] : ['Movie Leaks'];
+
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
                     name: scorePrefix + imdbItem.name,
-                    poster: 'https://images.metahub.space/poster/medium/' + imdbItem.id + '/img',
-                    description: scoreDesc + (imdbItem.description || ''),
-                    releaseInfo: imdbItem.releaseInfo,
+                    poster: (omdb && omdb.poster) || imdbItem.poster || 'https://images.metahub.space/poster/medium/' + imdbItem.id + '/img',
+                    description: scoreLine + ((omdb && omdb.plot) || imdbItem.description || ''),
+                    releaseInfo: imdbItem.releaseInfo || parsed.year,
                     genres: genres 
                 });
             } else {
                 newCatalog.push({
                     id: 'leaks_' + p.id,
                     type: 'movie',
-                    name: scorePrefix + parsed.title,
+                    name: parsed.title,
                     poster: null, 
-                    description: scoreDesc + 'Unmatched Release: ' + p.title,
+                    description: 'Unmatched Release: ' + p.title,
                     releaseInfo: parsed.year || '????',
-                    genres: genres
+                    genres: ['Unmatched']
                 });
             }
-            await delay(50);
+            await delay(100); 
         }
 
         const seenIds = new Set();
@@ -199,3 +188,5 @@ builder.defineMetaHandler(({ type, id }) => {
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000);
+
+```
