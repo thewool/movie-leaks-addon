@@ -13,9 +13,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.4', // Bumped version for Speed & Parallel Processing
-    name: 'Reddit Movie Leaks (Turbo)',
-    description: 'Scrapes r/MovieLeaks. High-speed parallel scraping with live RT scores.',
+    version: '6.0.6', // Bumped version to force Stremio update
+    name: 'Reddit Movie Leaks (Titles)',
+    description: 'Scrapes r/MovieLeaks. Scores strictly enforced in titles.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -69,7 +69,8 @@ async function fetchRottenTomatoesPrimary(title, year) {
                         if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) {
                             return `${score}%`;
                         }
-                    } else {
+                    } else if (!year || !rtYear) {
+                        // Trust exact title match if year info is missing
                         return `${score}%`;
                     }
                 }
@@ -127,7 +128,7 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING TURBO SCRAPE (v6.0.4) ---');
+    console.log('--- STARTING TURBO ACCURATE SCRAPE (v6.0.6) ---');
     lastStatus = "Fetching Reddit...";
     
     let allPosts = [];
@@ -158,7 +159,7 @@ async function updateCatalog() {
             if (keepFetching) await delay(1000); 
         }
 
-        console.log(`> Found ${allPosts.length} posts. Processing in Parallel...`);
+        console.log(`> Found ${allPosts.length} posts. Processing...`);
         const newCatalog = [];
 
         for (let i = 0; i < allPosts.length; i++) {
@@ -170,51 +171,58 @@ async function updateCatalog() {
                  lastStatus = `Scraping scores... (${i}/${allPosts.length})`;
             }
 
-            // SPEED FIX: Run IMDB resolution AND Rotten Tomatoes scrape at the EXACT same time
-            const [imdbItem, rtPrimaryScore] = await Promise.all([
-                resolveToImdb(parsed.title, parsed.year),
-                fetchRottenTomatoesPrimary(parsed.title, parsed.year)
+            // ACCURACY FIX: Resolve IMDB first to get the correct actualYear.
+            const imdbItem = await resolveToImdb(parsed.title, parsed.year);
+            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
+
+            // SPEED FIX: Run RT and OMDB in parallel!
+            const [rtPrimaryScore, omdbScore] = await Promise.all([
+                fetchRottenTomatoesPrimary(parsed.title, actualYear),
+                imdbItem ? fetchScoresFromOmdb(imdbItem.id) : null
             ]);
             
-            let rtScore = rtPrimaryScore;
-            
-            // If RT fails or returns nothing, use OMDB as a backup
-            if (!rtScore && imdbItem) {
-                rtScore = await fetchScoresFromOmdb(imdbItem.id);
-            }
+            // Prefer live RT score, fallback to OMDB
+            let rtScore = rtPrimaryScore || omdbScore;
 
-            const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
+            // Ensure clean formatting for the prefix
             const scorePrefix = rtScore ? `🍅 ${rtScore.replace('%', '')}% ` : ''; 
             const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
             const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
 
-            // ANDROID FIX: Put the score in 'releaseInfo' so it displays as a highly visible badge on the poster!
             const displayYear = (imdbItem && imdbItem.releaseInfo) ? imdbItem.releaseInfo : (actualYear || '????');
             const androidBadge = rtScore ? `🍅 ${rtScore.replace('%', '')}% • ${displayYear}` : displayYear;
 
+            let finalName = "";
+
             if (imdbItem) {
+                finalName = `${scorePrefix}${imdbItem.name}`;
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: `${scorePrefix}${imdbItem.name}`,
+                    name: finalName,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `${scoreDesc}${imdbItem.description || ''}`,
                     releaseInfo: androidBadge,
                     genres: genres 
                 });
             } else {
+                finalName = `${scorePrefix}${parsed.title}`;
                 newCatalog.push({
                     id: `leaks_${p.id}`,
                     type: 'movie',
-                    name: `${scorePrefix}${parsed.title}`,
+                    name: finalName,
                     poster: null, 
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
                     releaseInfo: androidBadge,
                     genres: genres
                 });
             }
+
+            // DIAGNOSTIC LOG: Prove what is being sent to Stremio
+            if (rtScore) {
+                console.log(`> Title Sent to Stremio: [${finalName}]`);
+            }
             
-            // Tiny delay to prevent getting blocked by Cloudflare, but much faster than before
             await delay(50);
         }
 
