@@ -12,9 +12,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.7', 
+    version: '6.0.8', 
     name: 'Reddit Movie Leaks (Verified)',
-    description: 'Scrapes r/MovieLeaks. Scores only shown for matched movies.',
+    description: 'Scrapes r/MovieLeaks. Tomatometer scores shown only for matched movies.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -42,7 +42,6 @@ async function fetchScoresFromOmdb(imdbId) {
 
         if (data && data.Response === 'True' && data.Ratings) {
             const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
-            // Returns an object so we can use the plot/poster if available
             return {
                 score: rt ? rt.Value : null,
                 plot: data.Plot !== 'N/A' ? data.Plot : null,
@@ -169,24 +168,22 @@ async function updateCatalog() {
     }
 }
 
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
+builder.defineCatalogHandler(async (args) => {
     if (movieCatalog.length === 0) {
         return { metas: [{ id: 'tt_status', type: 'movie', name: 'Status: ' + lastStatus, description: "Wait for fetch...", poster: 'https://via.placeholder.com/300x450.png?text=Loading...' }] };
     }
-    if (type === 'movie' && id === 'movieleaks_long') {
-        const skip = extra.skip ? parseInt(extra.skip) : 0;
+    if (args.type === 'movie' && args.id === 'movieleaks_long') {
+        const skip = args.extra && args.extra.skip ? parseInt(args.extra.skip) : 0;
         return { metas: movieCatalog.slice(skip, skip + 100) };
     }
     return { metas: [] };
 });
 
-builder.defineMetaHandler(({ type, id }) => {
-    const item = movieCatalog.find(i => i.id === id);
-    return item ? { meta: item } : { meta: null };
+builder.defineMetaHandler((args) => {
+    const item = movieCatalog.find(i => i.id === args.id);
+    return Promise.resolve(item ? { meta: item } : { meta: null });
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
 updateCatalog();
 setInterval(updateCatalog, 60 * 60 * 1000);
-
-```
