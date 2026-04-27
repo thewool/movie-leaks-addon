@@ -13,9 +13,9 @@ const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
 const manifest = {
     id: 'org.reddit.movieleaks.v6', 
-    version: '6.0.6', // Bumped version to force Stremio update
-    name: 'Reddit Movie Leaks (Titles)',
-    description: 'Scrapes r/MovieLeaks. Scores strictly enforced in titles.',
+    version: '6.0.2', // Bumped version for strict accuracy
+    name: 'Reddit Movie Leaks (with Scores)',
+    description: 'Scrapes r/MovieLeaks. STRICT TOMATOMETER SCORES.',
     idPrefixes: ['tt', 'leaks'], 
     resources: ['catalog', 'meta'],
     types: ['movie'],
@@ -35,63 +35,18 @@ let lastStatus = "Initializing...";
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- 1. RT Direct Fetcher (PRIMARY - Source of Truth) ---
-async function fetchRottenTomatoesPrimary(title, year) {
-    try {
-        const query = year ? `${title} ${year}` : title;
-        const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
-        const { data } = await axios.get(url, { 
-            headers: { 'User-Agent': USER_AGENT },
-            timeout: 5000 // Prevent hanging
-        });
-
-        const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
-        const cleanTarget = title.toLowerCase().replace(/[^a-z0-9]/g, '');
-        
-        for (const match of matches) {
-            const attrs = match[1];
-            
-            const isMovie = attrs.includes('data-type="movie"') || attrs.includes('type="movie"');
-            const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i); 
-            const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
-            const nameMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
-            
-            if (isMovie && scoreMatch && nameMatch) {
-                const score = scoreMatch[1];
-                const rtYear = yearMatch ? yearMatch[1] : null;
-                const rtNameRaw = nameMatch[1].replace(/&#[0-9]+;/g, ' ').trim();
-                const cleanResult = rtNameRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-                // STRICT: Title must be an exact alphanumeric match
-                if (cleanResult === cleanTarget) {
-                    if (year && rtYear) {
-                        // Allow +/- 1 year for festival releases vs wide releases
-                        if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) {
-                            return `${score}%`;
-                        }
-                    } else if (!year || !rtYear) {
-                        // Trust exact title match if year info is missing
-                        return `${score}%`;
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        // Silent error, fall back to OMDB
-    }
-    return null;
-}
-
-// --- 2. OMDB Fetcher (SECONDARY / FALLBACK) ---
+// --- 1. OMDB Fetcher (Primary & Reliable) ---
 async function fetchScoresFromOmdb(imdbId) {
     if (!imdbId) return null;
     try {
         const url = `http://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${imdbId}`;
-        const { data } = await axios.get(url, { timeout: 5000 });
+        const { data } = await axios.get(url);
 
         if (data && data.Response === 'True' && data.Ratings) {
+            // OMDB explicitly labels the Critic Tomatometer as "Rotten Tomatoes"
             const rt = data.Ratings.find(r => r.Source === "Rotten Tomatoes");
             if (rt) {
+                console.log(`> 🍅 OMDB Tomatometer Hit for ${imdbId}: ${rt.Value}`);
                 return rt.Value;
             }
         }
@@ -101,14 +56,70 @@ async function fetchScoresFromOmdb(imdbId) {
     return null;
 }
 
+// --- 2. RT Direct Fetcher (STRICT Fallback) ---
+async function fetchRottenTomatoesFallback(title, year) {
+    try {
+        const query = year ? `${title} ${year}` : title;
+        const url = `https://www.rottentomatoes.com/search?search=${encodeURIComponent(query)}`;
+        const { data } = await axios.get(url, { 
+            headers: { 'User-Agent': USER_AGENT } 
+        });
+
+        // Parse the HTML rows to ensure we only get MOVIES and match the YEAR
+        const matches = [...data.matchAll(/<search-page-media-row([^>]+)>/g)];
+        
+        for (const match of matches) {
+            const attrs = match[1];
+            
+            // Extract attributes from the HTML tag
+            const isMovie = attrs.includes('data-type="movie"') || attrs.includes('type="movie"');
+            const scoreMatch = attrs.match(/tomatometerscore\s*=\s*["'](\d+)["']/i); // strictly tomatometer
+            const yearMatch = attrs.match(/releaseyear\s*=\s*["'](\d{4})["']/i);
+            
+            if (isMovie && scoreMatch) {
+                const score = scoreMatch[1];
+                const rtYear = yearMatch ? yearMatch[1] : null;
+
+                // If a year is provided, ensure it matches (allow 1 year difference for festival vs wide release)
+                if (year && rtYear) {
+                    if (Math.abs(parseInt(year) - parseInt(rtYear)) <= 1) {
+                        console.log(`> 🍅 Scrape Hit for "${title}" (${rtYear}): ${score}%`);
+                        return `${score}%`;
+                    }
+                } else {
+                    // Extract title to prevent totally wrong matches when year is missing
+                    const titleMatch = attrs.match(/name\s*=\s*["']([^"']+)["']/i);
+                    const rtTitle = titleMatch ? titleMatch[1].replace(/&#[0-9]+;/g, '') : ""; // Handle HTML entities
+
+                    if (!year && rtTitle.toLowerCase() === title.toLowerCase()) {
+                        console.log(`> 🍅 Scrape Hit for "${title}": ${score}%`);
+                        return `${score}%`;
+                    } else if (!year) {
+                        // Very last resort if no year and title isn't exact
+                        console.log(`> 🍅 Loose Scrape Hit for "${title}": ${score}%`);
+                        return `${score}%`;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        // Silent error
+    }
+    return null;
+}
+
 function parseTitle(rawTitle) {
+    // Bulletproof parsing to handle titles ending in year like "Apex (2026)"
     const yearMatch = rawTitle.match(/(19|20)\d{2}/);
     if (yearMatch) {
         const yearIndex = yearMatch.index;
         let title = rawTitle.substring(0, yearIndex).trim();
+        // Clean up brackets, dots, hyphens
         title = title.replace(/[\._\(\)\[\]\-]/g, ' ').replace(/\s+/g, ' ').trim();
         return { title: title, year: yearMatch[0] };
     }
+    
+    // Fallback if no year found at all
     let title = rawTitle.replace(/[\._\(\)\[\]\-]/g, ' ').replace(/\s+/g, ' ').trim();
     return { title: title, year: null };
 }
@@ -117,7 +128,7 @@ async function resolveToImdb(title, year) {
     try {
         const query = year ? `${title} ${year}` : title;
         const url = `${CINEMETA_URL}/search=${encodeURIComponent(query)}.json`;
-        const { data } = await axios.get(url, { timeout: 5000 });
+        const { data } = await axios.get(url);
         if (data && data.metas && data.metas.length > 0) {
             return data.metas[0];
         }
@@ -128,8 +139,8 @@ async function resolveToImdb(title, year) {
 }
 
 async function updateCatalog() {
-    console.log('--- STARTING TURBO ACCURATE SCRAPE (v6.0.6) ---');
-    lastStatus = "Fetching Reddit...";
+    console.log('--- STARTING SCRAPE (v6.0.2) ---');
+    lastStatus = "Scraping Reddit...";
     
     let allPosts = [];
     let afterToken = null;
@@ -139,8 +150,9 @@ async function updateCatalog() {
 
     try {
         while (keepFetching) {
+            console.log(`> Fetching Page ${page}...`);
             const url = `${SUBREDDIT_URL}?limit=100&after=${afterToken || ''}`;
-            const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 8000 });
+            const response = await axios.get(url, { headers: { 'User-Agent': USER_AGENT } });
             const children = response.data.data.children;
             
             if (children.length === 0) { keepFetching = false; break; }
@@ -156,73 +168,54 @@ async function updateCatalog() {
             afterToken = response.data.data.after;
             if (!afterToken) keepFetching = false;
             page++;
-            if (keepFetching) await delay(1000); 
+            if (keepFetching) await delay(1500); 
         }
 
         console.log(`> Found ${allPosts.length} posts. Processing...`);
+        lastStatus = `Processing ${allPosts.length} items...`;
         const newCatalog = [];
 
-        for (let i = 0; i < allPosts.length; i++) {
-            const p = allPosts[i];
+        for (const p of allPosts) {
             const parsed = parseTitle(p.title);
             
-            // Update status dynamically so Stremio shows progress
-            if (i % 10 === 0) {
-                 lastStatus = `Scraping scores... (${i}/${allPosts.length})`;
-            }
-
-            // ACCURACY FIX: Resolve IMDB first to get the correct actualYear.
             const imdbItem = await resolveToImdb(parsed.title, parsed.year);
+            
+            // KEY FIX: Use Cinemeta's year if Reddit post didn't have one
             const actualYear = parsed.year || (imdbItem && imdbItem.releaseInfo ? imdbItem.releaseInfo.substring(0,4) : null);
 
-            // SPEED FIX: Run RT and OMDB in parallel!
-            const [rtPrimaryScore, omdbScore] = await Promise.all([
-                fetchRottenTomatoesPrimary(parsed.title, actualYear),
-                imdbItem ? fetchScoresFromOmdb(imdbItem.id) : null
-            ]);
-            
-            // Prefer live RT score, fallback to OMDB
-            let rtScore = rtPrimaryScore || omdbScore;
+            let rtScore = null;
+            if (imdbItem) {
+                rtScore = await fetchScoresFromOmdb(imdbItem.id);
+            }
+            if (!rtScore) {
+                rtScore = await fetchRottenTomatoesFallback(parsed.title, actualYear);
+            }
 
-            // Ensure clean formatting for the prefix
-            const scorePrefix = rtScore ? `🍅 ${rtScore.replace('%', '')}% ` : ''; 
+            const scorePrefix = rtScore ? `🍅 ${rtScore} ` : '';
             const scoreDesc = rtScore ? `⭐️ ROTTEN TOMATOES: ${rtScore} ⭐️\n\n` : '';
             const genres = rtScore ? [`RT: ${rtScore}`, 'Movie Leaks'] : ['Movie Leaks'];
 
-            const displayYear = (imdbItem && imdbItem.releaseInfo) ? imdbItem.releaseInfo : (actualYear || '????');
-            const androidBadge = rtScore ? `🍅 ${rtScore.replace('%', '')}% • ${displayYear}` : displayYear;
-
-            let finalName = "";
-
             if (imdbItem) {
-                finalName = `${scorePrefix}${imdbItem.name}`;
                 newCatalog.push({
                     id: imdbItem.id,
                     type: 'movie',
-                    name: finalName,
+                    name: `${scorePrefix}${imdbItem.name}`,
                     poster: `https://images.metahub.space/poster/medium/${imdbItem.id}/img`,
                     description: `${scoreDesc}${imdbItem.description || ''}`,
-                    releaseInfo: androidBadge,
+                    releaseInfo: imdbItem.releaseInfo,
                     genres: genres 
                 });
             } else {
-                finalName = `${scorePrefix}${parsed.title}`;
                 newCatalog.push({
                     id: `leaks_${p.id}`,
                     type: 'movie',
-                    name: finalName,
+                    name: `${scorePrefix}${parsed.title}`,
                     poster: null, 
                     description: `${scoreDesc}Unmatched Release: ${p.title}`,
-                    releaseInfo: androidBadge,
+                    releaseInfo: parsed.year || '????',
                     genres: genres
                 });
             }
-
-            // DIAGNOSTIC LOG: Prove what is being sent to Stremio
-            if (rtScore) {
-                console.log(`> Title Sent to Stremio: [${finalName}]`);
-            }
-            
             await delay(50);
         }
 
@@ -237,7 +230,7 @@ async function updateCatalog() {
 
         movieCatalog = uniqueCatalog;
         lastStatus = "Ready";
-        console.log(`> Turbo Update Complete. Catalog size: ${movieCatalog.length}`);
+        console.log(`> Update Complete. Catalog size: ${movieCatalog.length}`);
 
     } catch (error) {
         console.error('! Error:', error.message);
